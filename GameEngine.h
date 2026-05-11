@@ -1,10 +1,13 @@
 #pragma once
 #include "SettingsManager.h"
+#include "mp3Converter.h"
 #include <QAudioOutput>
+#include <QElapsedTimer>
 #include <QMediaPlayer>
 #include <QObject>
 #include <QTimer>
-#include <QRandomGenerator>
+#include <vector>
+#include <utility>
 
 struct Note {
   int lane;
@@ -26,160 +29,41 @@ public:
   QString currentSongName;
   std::vector<Note> activeNotes;
   std::vector<Qt::Key> activeKeys;
+  bool isExperimental = false;
+  QElapsedTimer gameTimer;
+  bool isGenerating = false;
+  int generationProgress = 0;
+  qint64 lastUpdateMs = 0;
+  double holdScoreAccumulator = 0.0;
 
-  explicit GameEngine(QObject *parent = nullptr) : QObject(parent) {
-    physicsTimer = new QTimer(this);
-    connect(physicsTimer, &QTimer::timeout, this, &GameEngine::updatePhysics);
-    spawnTimer = new QTimer(this);
-    connect(spawnTimer, &QTimer::timeout, this, &GameEngine::spawnNote);
+  struct ScheduledNote {
+    int timeMs;
+    int lane;
+    double duration;
+    bool spawned;
+  };
+  std::vector<ScheduledNote> scheduledNotes;
+  double msToHit = 0.0;
+  bool isWaitingForMedia = false;
+  size_t nextScheduledNoteIdx = 0;
+  ChartGenerator* m_currentGenerator = nullptr;
 
-    player = new QMediaPlayer(this);
-    audioOutput = new QAudioOutput(this);
-    player->setAudioOutput(audioOutput);
-
-    connect(player, &QMediaPlayer::mediaStatusChanged, this,
-            [this](QMediaPlayer::MediaStatus status) {
-              if (status == QMediaPlayer::EndOfMedia && isPlaying) {
-                endGame();
-              }
-            });
-  }
-
-  void startGame(const QString &songName, const QString &songPath) {
-    laneCount = SettingsManager::instance().getLaneCount();
-    activeKeys = SettingsManager::instance().getActiveKeys(laneCount);
-    Difficulty diff = SettingsManager::instance().getDifficulty();
-
-    if (diff == Difficulty::Easy) {
-      fallSpeed = 4.0;
-      spawnInterval = 1000;
-    } else if (diff == Difficulty::Medium) {
-      fallSpeed = 6.0;
-      spawnInterval = 600;
-    } else {
-      fallSpeed = 8.5;
-      spawnInterval = 350;
-    }
-
-    currentSongName = songName;
-    currentScore = 0;
-    comboMultiplier = 1;
-    activeNotes.clear();
-    isPlaying = true;
-
-    if (!songPath.isEmpty()) {
-      player->setSource(QUrl::fromLocalFile(songPath));
-      audioOutput->setVolume(SettingsManager::instance().getVolume() / 100.0);
-      player->play();
-    }
-
-    physicsTimer->start(16);
-    spawnTimer->start(spawnInterval);
-  }
-
-  void stopGame() {
-    isPlaying = false;
-    physicsTimer->stop();
-    spawnTimer->stop();
-    player->stop();
-  }
-
-  void endGame() {
-    if (!isPlaying)
-      return;
-    isPlaying = false;
-    physicsTimer->stop();
-    spawnTimer->stop();
-    player->stop();
-    emit gameOver(currentScore);
-  }
-
-  std::pair<bool, double> checkHit(int lane) {
-    for (auto &note : activeNotes) {
-      if (note.active && note.lane == lane && !note.isHeld) {
-        if (std::abs(note.y - hitZoneCenter) <= hitTolerance) {
-          currentScore += 10 * comboMultiplier;
-          if (note.length > 0) {
-            note.isHeld = true;
-          } else {
-            note.active = false;
-            comboMultiplier++;
-          }
-          return {true, hitZoneCenter};
-        }
-      }
-    }
-    comboMultiplier = 1;
-    return {false, 0.0};
-  }
-
-  void releaseHit(int lane) {
-    for (auto &note : activeNotes) {
-      if (note.active && note.lane == lane && note.isHeld) {
-        note.isHeld = false;
-        if (note.y - note.length < hitZoneCenter - hitTolerance) {
-          note.active = false;
-          comboMultiplier = 1;
-        } else {
-          note.active = false;
-          comboMultiplier++;
-        }
-        break;
-      }
-    }
-  }
+  explicit GameEngine(QObject *parent = nullptr);
+  void startGame(const QString &songName, const QString &songPath);
+  void startPlayback(const QString &songPath);
+  void finishStartPlayback();
+  void stopGame();
+  void endGame();
+  std::pair<bool, double> checkHit(int lane);
+  void releaseHit(int lane);
 
 signals:
   void stateUpdated();
   void gameOver(int finalScore);
 
 private slots:
-  void spawnNote() {
-    if (!isPlaying)
-      return;
-
-    int lane = QRandomGenerator::global()->bounded(laneCount);
-
-    double safeDistance = 150.0;
-    for (const auto &n : activeNotes) {
-      if (n.lane == lane) {
-        double noteEnd = n.y - n.length;
-        if (noteEnd < safeDistance)
-          return;
-      }
-    }
-
-    bool isLong = (QRandomGenerator::global()->bounded(5) == 0);
-    double length = isLong ? (300.0 + QRandomGenerator::global()->bounded(300)) : 0.0;
-    activeNotes.push_back({lane, -50.0, length, true, false});
-  }
-
-  void updatePhysics() {
-    for (auto &note : activeNotes) {
-      if (!note.active)
-        continue;
-
-      note.y += fallSpeed;
-
-      if (note.isHeld) {
-        currentScore += 1;
-        if (note.y - note.length >= hitZoneCenter) {
-          note.active = false;
-          comboMultiplier++;
-        }
-      } else {
-        double checkY = (note.length > 0) ? (note.y - note.length) : note.y;
-        if (checkY > hitZoneCenter + hitTolerance) {
-          note.active = false;
-          comboMultiplier = 1;
-        }
-      }
-    }
-    activeNotes.erase(std::remove_if(activeNotes.begin(), activeNotes.end(),
-                                     [](const Note &n) { return !n.active; }),
-                      activeNotes.end());
-    emit stateUpdated();
-  }
+  void spawnNote();
+  void updatePhysics();
 
 private:
   QTimer *physicsTimer;
